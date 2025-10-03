@@ -6,7 +6,6 @@ const { stripe } = require('../config/stripe');
 const { sendSubscriptionEmail } = require('../utils/email');
 const { ErrorResponse, asyncHandler } = require('../utils/errorHandler');
 
-// Global object to store data across webhook events
 let obj = {};
 
 // Helpers to safely handle Stripe UNIX timestamps (in seconds)
@@ -36,6 +35,7 @@ const ensureStripeSubscription = async (maybeSubscription) => {
  */
 async function extractCardDetailsFromPaymentIntent(paymentIntentId) {
   try {
+
     console.log('💳 Extracting card details from payment intent:', paymentIntentId);
 
     // Retrieve payment intent with payment method expanded
@@ -45,6 +45,8 @@ async function extractCardDetailsFromPaymentIntent(paymentIntentId) {
 
     console.log('✅ Payment intent retrieved:', paymentIntent.id);
     console.log('📋 Payment method type:', paymentIntent.payment_method?.type);
+
+   
 
     if (!paymentIntent.payment_method) {
       console.warn('⚠️ No payment method attached to payment intent');
@@ -60,7 +62,9 @@ async function extractCardDetailsFromPaymentIntent(paymentIntentId) {
       return { cardDetails: null, paymentMethodId };
     }
 
-    console.log('⚠️ Payment method details:', paymentMethod);
+    console.warn('⚠️ Payment method');
+    console.log(paymentMethod);
+    console.warn('⚠️ Payment method');
 
     const card = paymentMethod.card;
     const cardDetails = {
@@ -72,19 +76,17 @@ async function extractCardDetailsFromPaymentIntent(paymentIntentId) {
       country: card.country || null
     };
 
-    // Store card details in obj for later use
     Object.assign(obj, { 
-      paymentIntentId: paymentIntent.id, 
-      paymentType: paymentIntent.payment_method?.type, 
-      paymentMethodId: paymentMethodId,
-      brand: card.brand,
-      last4: card.last4,
-      expMonth: card.exp_month,
-      expYear: card.exp_year,
-      funding: card.funding,
-      country: card.country,
-      cardDetails: cardDetails
-    });
+    paymentIntentId: paymentIntent.id, 
+    paymentType: paymentIntent.payment_method?.type, 
+    paymentMethod: paymentIntent.payment_method,
+    brand: card.brand,
+    last4: card.last4,
+    expMonth: card.exp_month,
+    expYear: card.exp_year,
+    funding: card.funding,
+    country: card.country
+  });
 
     console.log('✅ Card details extracted:', JSON.stringify(cardDetails, null, 2));
     return { cardDetails, paymentMethodId };
@@ -144,9 +146,6 @@ const handleStripeWebhook = asyncHandler(async (req, res, next) => {
 
   console.log('🎯 Received Stripe webhook:', event.type);
 
-  // Reset obj for new webhook event
-  obj = {};
-
   try {
     switch (event.type) {
       case 'checkout.session.completed':
@@ -200,6 +199,8 @@ const handleCheckoutSessionCompleted = async (session) => {
   const planType = session.metadata.planType;
   const isFirstSubscription = session.metadata.isFirstSubscription === 'true';
 
+ 
+
   if (!userId) {
     console.error('❌ No userId in session metadata');
     return;
@@ -216,13 +217,11 @@ const handleCheckoutSessionCompleted = async (session) => {
     await user.save();
   }
 
-  // Store session data in obj
-  Object.assign(obj, {
+   Object.assign(obj, {
     sessionId: session.id,
     userId: session.metadata.userId,
     planType: session.metadata.planType,
-    userEmail: user.email,
-    isFirstSubscription: isFirstSubscription
+    userEmail: user.email
   });
 
   console.log(`✅ Checkout completed for user ${user.email}, planType: ${planType}`);
@@ -232,15 +231,14 @@ const handleCheckoutSessionCompleted = async (session) => {
 const handleSubscriptionCreated = async (stripeSubscription) => {
   console.log('✅ Processing customer.subscription.created:', stripeSubscription.id);
 
+ 
+
   const userId = stripeSubscription.metadata.userId;
   const planType = stripeSubscription.metadata.planType;
   const isFirstSubscription = stripeSubscription.metadata.isFirstSubscription === 'true';
 
-  // Store subscription data in obj
-  Object.assign(obj, {
-    stripeSubscriptionId: stripeSubscription.id,
-    stripeCustomerId: stripeSubscription.customer,
-    subscriptionStatus: stripeSubscription.status
+   Object.assign(obj, {
+    stripeSubscriptionId: stripeSubscription.id
   });
 
   if (!userId) {
@@ -252,14 +250,6 @@ const handleSubscriptionCreated = async (stripeSubscription) => {
   if (!user) {
     console.error('❌ User not found:', userId);
     return;
-  }
-
-  // Store user data in obj
-  if (!obj.userId) {
-    Object.assign(obj, {
-      userId: user._id.toString(),
-      userEmail: user.email
-    });
   }
 
   const priceId = stripeSubscription.items.data[0].price.id;
@@ -300,12 +290,6 @@ const handleSubscriptionCreated = async (stripeSubscription) => {
       interval: plan.interval,
       intervalCount: plan.intervalCount,
       metadata: stripeSubscription.metadata
-    });
-
-    // Store subscription reference in obj
-    Object.assign(obj, {
-      subscriptionId: subscription._id.toString(),
-      subscriptionType: planType
     });
 
     console.log(`✅ Subscription created: ${subscription._id} for user ${user.email}`);
@@ -369,11 +353,8 @@ const handleSubscriptionUpdated = async (stripeSubscription) => {
 
   await subscription.save();
 
-  // Update obj with subscription data
   Object.assign(obj, {
-    subscriptionStatus: subscription.status,
-    subscriptionId: subscription._id.toString(),
-    stripeSubscriptionId: stripeSubscription.id
+    subscriptionStatus: subscription.status
   });
 
   console.log(`✅ Subscription updated: ${subscription._id}, status: ${subscription.status}`);
@@ -401,23 +382,18 @@ const handleSubscriptionDeleted = async (stripeSubscription) => {
 
 /**
  * Handle invoice.payment_succeeded
- * Creates payment record using data from obj
+ * Creates payment record WITHOUT card details initially
+ * Card details will be added by payment_intent.succeeded event
  */
 const handleInvoicePaymentSucceeded = async (invoice) => {
   console.log('⚡ Processing invoice.payment_succeeded:', invoice.id);
 
-  // Store invoice data in obj
-  Object.assign(obj, {
-    invoiceId: invoice.id,
-    invoiceAmount: invoice.amount_paid || invoice.total || 0,
-    invoiceCurrency: invoice.currency || 'eur',
-    invoiceStatus: invoice.status,
-    billingReason: invoice.billing_reason,
-    hostedInvoiceUrl: invoice.hosted_invoice_url
+   Object.assign(obj, {
+    InvoiceId: invoice.id
   });
 
   console.log("----------------------");
-  console.log("Current obj state:", obj);
+  console.log(obj);
   console.log("----------------------");
 
   if (!invoice.subscription) {
@@ -434,15 +410,6 @@ const handleInvoicePaymentSucceeded = async (invoice) => {
     return;
   }
 
-  // Update obj with subscription and user data
-  Object.assign(obj, {
-    userId: subscription.user._id.toString(),
-    userEmail: subscription.user.email,
-    subscriptionId: subscription._id.toString(),
-    stripeSubscriptionId: subscription.stripeSubscriptionId,
-    subscriptionType: subscription.subscriptionType
-  });
-
   // Determine payment type
   let paymentType = 'recurring_payment';
   if (invoice.billing_reason === 'subscription_create') {
@@ -453,18 +420,13 @@ const handleInvoicePaymentSucceeded = async (invoice) => {
     paymentType = 'upgrade_payment';
   }
 
-  Object.assign(obj, {
-    paymentType: paymentType
-  });
-
   // Get payment intent ID
   const paymentIntentId = await getInvoicePaymentIntentId(invoice);
 
   if (!paymentIntentId) {
     console.warn('⚠️ No payment_intent found for invoice:', invoice.id);
-    
-    // Create payment with fallback using obj data
-    const fallbackId = `invoice_${obj.invoiceId}`;
+    // Use invoice ID as fallback
+    const fallbackId = `invoice_${obj.InvoiceId}`;
     
     try {
       // Check if payment already exists with this fallback ID
@@ -477,46 +439,32 @@ const handleInvoicePaymentSucceeded = async (invoice) => {
         return;
       }
 
-      // Create payment using obj data
+      // Create payment with fallback ID
       const payment = await Payment.create({
         user: obj.userId,
-        subscription: obj.subscriptionId,
-        stripePaymentIntentId: fallbackId,
-        stripeInvoiceId: obj.invoiceId,
-        amount: obj.invoiceAmount,
-        currency: obj.invoiceCurrency,
-        status: 'succeeded',
-        paymentMethod: obj.paymentMethodId || null,
-        cardDetails: obj.cardDetails || null,
-        paymentType: obj.paymentType,
-        description: `Payment for ${obj.subscriptionType} subscription`,
-        receiptUrl: obj.hostedInvoiceUrl || null,
+        subscription: obj.stripeSubscriptionId,
+        stripePaymentIntentId: obj.paymentIntentId,
+        stripeInvoiceId: obj.InvoiceId,
+        amount: obj.amount || 0,
+        currency: obj.currency || 'eur',
+        status: obj.status,
+        paymentMethod: null,
+        cardDetails: obj.paymentMethod.card,
+        paymentType:obj.paymentType,
+        description: null,
+        receiptUrl: null,
         failureReason: null,
         refunded: false,
         refundAmount: 0,
-        metadata: invoice.metadata || {}
+        metadata: {}
       });
 
       console.log(`✅ Payment created with fallback ID: ${payment._id}`);
-      console.log("Payment data:", {
-        user: obj.userId,
-        subscription: obj.subscriptionId,
-        amount: obj.invoiceAmount,
-        cardDetails: obj.cardDetails
-      });
     } catch (error) {
       console.error('❌ Error creating payment with fallback ID:', error);
     }
     return;
   }
-
-  // Store payment intent ID in obj
-  Object.assign(obj, {
-    paymentIntentId: paymentIntentId
-  });
-
-  // Extract card details from payment intent and store in obj
-  await extractCardDetailsFromPaymentIntent(paymentIntentId);
 
   // Check if payment already exists
   const existingPayment = await Payment.findOne({
@@ -534,42 +482,28 @@ const handleInvoicePaymentSucceeded = async (invoice) => {
     return;
   }
 
-  // Create payment record using obj data
+  // Create payment record (card details will be added by payment_intent.succeeded)
   try {
-    console.log("Creating payment with obj data:", {
-      userId: obj.userId,
-      subscriptionId: obj.subscriptionId,
-      paymentIntentId: obj.paymentIntentId,
-      invoiceId: obj.invoiceId,
-      amount: obj.invoiceAmount,
-      currency: obj.invoiceCurrency,
-      cardDetails: obj.cardDetails,
-      paymentType: obj.paymentType
-    });
+     const payment = await Payment.create({
+        user: obj.userId,
+        subscription: obj.stripeSubscriptionId,
+        stripePaymentIntentId: obj.paymentIntentId,
+        stripeInvoiceId: obj.InvoiceId,
+        amount: obj.amount || 0,
+        currency: obj.currency || 'eur',
+        status: obj.status,
+        paymentMethod: null,
+        cardDetails: obj.paymentMethod.card,
+        paymentType:obj.paymentType,
+        description: null,
+        receiptUrl: null,
+        failureReason: null,
+        refunded: false,
+        refundAmount: 0,
+        metadata: {}
+      });
 
-    const payment = await Payment.create({
-      user: obj.userId,
-      subscription: obj.subscriptionId,
-      stripePaymentIntentId: obj.paymentIntentId,
-      stripeInvoiceId: obj.invoiceId,
-      amount: obj.invoiceAmount,
-      currency: obj.invoiceCurrency,
-      status: 'succeeded',
-      paymentMethod: obj.paymentMethodId || null,
-      cardDetails: obj.cardDetails || null,
-      paymentType: obj.paymentType,
-      description: `Payment for ${obj.subscriptionType} subscription`,
-      receiptUrl: obj.hostedInvoiceUrl || null,
-      failureReason: null,
-      refunded: false,
-      refundAmount: 0,
-      metadata: invoice.metadata || {}
-    });
-
-    console.log(`✅ Payment created: ${payment._id}`);
-    if (obj.cardDetails) {
-      console.log(`💳 ${obj.cardDetails.brand} ****${obj.cardDetails.last4} (${obj.cardDetails.expMonth}/${obj.cardDetails.expYear})`);
-    }
+    console.log(`✅ Payment created: ${payment._id} (card details will be added by payment_intent.succeeded)`);
   } catch (error) {
     if (error.code === 11000) {
       console.log('ℹ️ Payment already exists (duplicate key), skipping creation');
@@ -589,34 +523,34 @@ const handleInvoicePaymentSucceeded = async (invoice) => {
 /**
  * Handle payment_intent.succeeded
  * This event fires when payment is successful and contains card details
- * Updates obj with payment data and updates existing payment records
+ * Updates the existing payment record with card information
+ * 
+ * CRITICAL: This is the PRIMARY source for complete payment data including card details
  */
 const handlePaymentIntentSucceeded = async (paymentIntent) => {
   console.log('💳 Processing payment_intent.succeeded:', paymentIntent.id);
   console.log('💰 Amount:', paymentIntent.amount, paymentIntent.currency);
   console.log('📋 Status:', paymentIntent.status);
 
-  // Store payment intent data in obj
-  Object.assign(obj, {
-    paymentIntentId: paymentIntent.id,
-    amount: paymentIntent.amount,
-    currency: paymentIntent.currency,
-    status: paymentIntent.status,
-    receiptUrl: paymentIntent.charges?.data[0]?.receipt_url || null
-  });
-
   // Extract card details and payment method from payment intent
   const { cardDetails, paymentMethodId } = await extractCardDetailsFromPaymentIntent(paymentIntent.id);
-
-  console.log("Payment Intent Details:");
-  console.log(paymentIntent);
-  console.log("Card Details:", cardDetails);
-  console.log("Current obj state:", obj);
 
   // Find the payment record by payment intent ID
   let payment = await Payment.findOne({
     stripePaymentIntentId: paymentIntent.id
   });
+
+   Object.assign(obj, {
+    amount: paymentIntent.amount,
+    currency: paymentIntent.currency,
+    status: paymentIntent.status
+  });
+
+
+  console.log("paymentIntent");
+  console.log(paymentIntent);
+  console.log(cardDetails);
+  console.log("paymentIntent");
 
   if (!payment) {
     console.warn('⚠️ No payment record found for payment intent:', paymentIntent.id);
@@ -634,17 +568,6 @@ const handlePaymentIntentSucceeded = async (paymentIntent) => {
             stripeSubscriptionId: invoice.subscription
           }).populate('user');
           console.log('✅ Found subscription from invoice:', subscription?._id);
-          
-          // Update obj with subscription data
-          if (subscription) {
-            Object.assign(obj, {
-              userId: subscription.user._id.toString(),
-              userEmail: subscription.user.email,
-              subscriptionId: subscription._id.toString(),
-              stripeSubscriptionId: subscription.stripeSubscriptionId,
-              subscriptionType: subscription.subscriptionType
-            });
-          }
         }
       } catch (err) {
         console.error('⚠️ Error retrieving invoice:', err.message);
@@ -655,16 +578,6 @@ const handlePaymentIntentSucceeded = async (paymentIntent) => {
     if (!subscription && paymentIntent.metadata && paymentIntent.metadata.subscriptionId) {
       subscription = await Subscription.findById(paymentIntent.metadata.subscriptionId).populate('user');
       console.log('✅ Found subscription from metadata:', subscription?._id);
-      
-      if (subscription) {
-        Object.assign(obj, {
-          userId: subscription.user._id.toString(),
-          userEmail: subscription.user.email,
-          subscriptionId: subscription._id.toString(),
-          stripeSubscriptionId: subscription.stripeSubscriptionId,
-          subscriptionType: subscription.subscriptionType
-        });
-      }
     }
 
     // If we still don't have a subscription, we can't create a payment record
@@ -674,42 +587,37 @@ const handlePaymentIntentSucceeded = async (paymentIntent) => {
     }
 
     // Determine payment type
-    if (!obj.paymentType) {
-      let paymentType = 'recurring_payment';
-      if (paymentIntent.metadata && paymentIntent.metadata.paymentType) {
-        paymentType = paymentIntent.metadata.paymentType;
-      } else if (subscription.subscriptionType === 'initial') {
-        paymentType = 'initial_payment';
-      }
-      Object.assign(obj, { paymentType: paymentType });
+    let paymentType = 'recurring_payment';
+    if (paymentIntent.metadata && paymentIntent.metadata.paymentType) {
+      paymentType = paymentIntent.metadata.paymentType;
+    } else if (subscription.subscriptionType === 'initial') {
+      paymentType = 'initial_payment';
     }
 
-    // Create new payment record with obj data
+    // Create new payment record with all data
     try {
-      console.log("Creating new payment with obj data:", obj);
-
-      payment = await Payment.create({
+       const payment = await Payment.create({
         user: obj.userId,
-        subscription: obj.subscriptionId,
+        subscription: obj.stripeSubscriptionId,
         stripePaymentIntentId: obj.paymentIntentId,
-        stripeInvoiceId: obj.invoiceId || paymentIntent.invoice || null,
-        amount: obj.amount,
-        currency: obj.currency,
+        stripeInvoiceId: obj.InvoiceId,
+        amount: obj.amount || 0,
+        currency: obj.currency || 'eur',
         status: obj.status,
-        paymentMethod: obj.paymentMethodId,
-        cardDetails: obj.cardDetails,
-        paymentType: obj.paymentType,
-        description: `Payment for ${obj.subscriptionType} subscription`,
-        receiptUrl: obj.receiptUrl,
+        paymentMethod: null,
+        cardDetails: obj.paymentMethod.card,
+        paymentType:obj.paymentType,
+        description: null,
+        receiptUrl: null,
         failureReason: null,
         refunded: false,
         refundAmount: 0,
-        metadata: paymentIntent.metadata || {}
+        metadata: {}
       });
 
       console.log(`✅ New payment record created with complete data: ${payment._id}`);
-      if (obj.cardDetails) {
-        console.log(`💳 ${obj.cardDetails.brand} ****${obj.cardDetails.last4} (${obj.cardDetails.expMonth}/${obj.cardDetails.expYear})`);
+      if (cardDetails) {
+        console.log(`💳 ${cardDetails.brand} ****${cardDetails.last4} (${cardDetails.expMonth}/${cardDetails.expYear})`);
       }
     } catch (error) {
       if (error.code === 11000) {
@@ -725,52 +633,52 @@ const handlePaymentIntentSucceeded = async (paymentIntent) => {
     }
   }
 
-  // Update existing payment with card details and other info from obj
+  // Update existing payment with card details and other info
   if (payment) {
     try {
       let updated = false;
 
       // Update card details if available and not already set
-      if (obj.cardDetails && !payment.cardDetails) {
-        payment.cardDetails = obj.cardDetails;
+      if (cardDetails && !payment.cardDetails) {
+        payment.cardDetails = cardDetails;
         updated = true;
         console.log('✅ Card details added to payment');
       }
 
       // Update payment method if available and not already set
-      if (obj.paymentMethodId && !payment.paymentMethod) {
-        payment.paymentMethod = obj.paymentMethodId;
+      if (paymentMethodId && !payment.paymentMethod) {
+        payment.paymentMethod = paymentMethodId;
         updated = true;
         console.log('✅ Payment method added to payment');
       }
 
       // Update status if needed
-      if (obj.status && payment.status !== obj.status) {
-        payment.status = obj.status;
+      if (paymentIntent.status && payment.status !== paymentIntent.status) {
+        payment.status = paymentIntent.status;
         updated = true;
-        console.log('✅ Payment status updated to:', obj.status);
+        console.log('✅ Payment status updated to:', paymentIntent.status);
       }
 
       // Update receipt URL if available and not already set
-      if (obj.receiptUrl && !payment.receiptUrl) {
-        payment.receiptUrl = obj.receiptUrl;
+      if (paymentIntent.charges?.data[0]?.receipt_url && !payment.receiptUrl) {
+        payment.receiptUrl = paymentIntent.charges.data[0].receipt_url;
         updated = true;
         console.log('✅ Receipt URL added to payment');
       }
 
       // Update amount if it was zero or not set
-      if (obj.amount && (!payment.amount || payment.amount === 0)) {
-        payment.amount = obj.amount;
+      if (paymentIntent.amount && (!payment.amount || payment.amount === 0)) {
+        payment.amount = paymentIntent.amount;
         updated = true;
-        console.log('✅ Payment amount updated to:', obj.amount);
+        console.log('✅ Payment amount updated to:', paymentIntent.amount);
       }
 
       if (updated) {
         await payment.save();
         console.log(`✅ Payment ${payment._id} updated successfully`);
         
-        if (obj.cardDetails) {
-          console.log(`💳 ${obj.cardDetails.brand} ****${obj.cardDetails.last4} (${obj.cardDetails.expMonth}/${obj.cardDetails.expYear})`);
+        if (cardDetails) {
+          console.log(`💳 ${cardDetails.brand} ****${cardDetails.last4} (${cardDetails.expMonth}/${cardDetails.expYear})`);
         }
       } else {
         console.log('ℹ️ Payment already has all data, no update needed');
