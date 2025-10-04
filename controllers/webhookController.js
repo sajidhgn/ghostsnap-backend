@@ -287,8 +287,8 @@ const handleSubscriptionCreated = async (stripeSubscription) => {
       subscriptionType: planType,
       amount: plan.amount,
       currency: plan.currency,
-      interval: plan.interval,
-      intervalCount: plan.intervalCount,
+      interval: plan.interval || 'week', // Default to 'week' if not set
+      intervalCount: plan.intervalCount || 1,
       metadata: stripeSubscription.metadata
     });
 
@@ -441,22 +441,22 @@ const handleInvoicePaymentSucceeded = async (invoice) => {
 
       // Create payment with fallback ID
       const payment = await Payment.create({
-        user: obj.userId,
-        subscription: obj.stripeSubscriptionId,
-        stripePaymentIntentId: obj.paymentIntentId,
-        stripeInvoiceId: obj.InvoiceId,
-        amount: obj.amount || 0,
-        currency: obj.currency || 'eur',
-        status: obj.status,
+        user: subscription.user._id,
+        subscription: subscription._id,
+        stripePaymentIntentId: fallbackId,
+        stripeInvoiceId: invoice.id,
+        amount: invoice.amount_paid || invoice.amount_due || 0,
+        currency: invoice.currency || 'eur',
+        status: 'succeeded',
         paymentMethod: null,
-        cardDetails: obj.paymentMethod.card,
-        paymentType:obj.paymentType,
-        description: null,
+        cardDetails: null,
+        paymentType: paymentType,
+        description: `Payment for ${subscription.subscriptionType} subscription`,
         receiptUrl: null,
         failureReason: null,
         refunded: false,
         refundAmount: 0,
-        metadata: {}
+        metadata: invoice.metadata || {}
       });
 
       console.log(`✅ Payment created with fallback ID: ${payment._id}`);
@@ -484,24 +484,24 @@ const handleInvoicePaymentSucceeded = async (invoice) => {
 
   // Create payment record (card details will be added by payment_intent.succeeded)
   try {
-     const payment = await Payment.create({
-        user: obj.userId,
-        subscription: obj.stripeSubscriptionId,
-        stripePaymentIntentId: obj.paymentIntentId,
-        stripeInvoiceId: obj.InvoiceId,
-        amount: obj.amount || 0,
-        currency: obj.currency || 'eur',
-        status: obj.status,
-        paymentMethod: null,
-        cardDetails: obj.paymentMethod.card,
-        paymentType:obj.paymentType,
-        description: null,
-        receiptUrl: null,
-        failureReason: null,
-        refunded: false,
-        refundAmount: 0,
-        metadata: {}
-      });
+    const payment = await Payment.create({
+      user: subscription.user._id,
+      subscription: subscription._id,
+      stripePaymentIntentId: paymentIntentId,
+      stripeInvoiceId: invoice.id,
+      amount: invoice.amount_paid || invoice.amount_due || 0,
+      currency: invoice.currency || 'eur',
+      status: 'succeeded',
+      paymentMethod: null,
+      cardDetails: null, // Will be added by payment_intent.succeeded
+      paymentType: paymentType,
+      description: `Payment for ${subscription.subscriptionType} subscription`,
+      receiptUrl: null,
+      failureReason: null,
+      refunded: false,
+      refundAmount: 0,
+      metadata: invoice.metadata || {}
+    });
 
     console.log(`✅ Payment created: ${payment._id} (card details will be added by payment_intent.succeeded)`);
   } catch (error) {
@@ -596,23 +596,23 @@ const handlePaymentIntentSucceeded = async (paymentIntent) => {
 
     // Create new payment record with all data
     try {
-       const payment = await Payment.create({
-        user: obj.userId,
-        subscription: obj.stripeSubscriptionId,
-        stripePaymentIntentId: obj.paymentIntentId,
-        stripeInvoiceId: obj.InvoiceId,
-        amount: obj.amount || 0,
-        currency: obj.currency || 'eur',
-        status: obj.status,
-        paymentMethod: null,
-        cardDetails: obj.paymentMethod.card,
-        paymentType:obj.paymentType,
-        description: null,
-        receiptUrl: null,
+      const payment = await Payment.create({
+        user: subscription.user._id,
+        subscription: subscription._id,
+        stripePaymentIntentId: paymentIntent.id,
+        stripeInvoiceId: paymentIntent.invoice || null,
+        amount: paymentIntent.amount,
+        currency: paymentIntent.currency,
+        status: paymentIntent.status,
+        paymentMethod: paymentMethodId,
+        cardDetails: cardDetails,
+        paymentType: paymentType,
+        description: `Payment for ${subscription.subscriptionType} subscription`,
+        receiptUrl: paymentIntent.charges?.data[0]?.receipt_url || null,
         failureReason: null,
         refunded: false,
         refundAmount: 0,
-        metadata: {}
+        metadata: paymentIntent.metadata || {}
       });
 
       console.log(`✅ New payment record created with complete data: ${payment._id}`);

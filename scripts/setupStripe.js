@@ -29,6 +29,7 @@ const setupStripe = async () => {
       stripeProductId: stripeProducts.initialProductId,
       amount: 200, // 2€ in cents
       currency: 'eur',
+      interval: 'week', // Set interval for initial plan
       intervalCount: 1,
       planType: 'initial',
       trialPeriodDays: 3,

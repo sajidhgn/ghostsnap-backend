@@ -32,7 +32,6 @@ const createStripeProducts = async () => {
     const initialPrice = await stripe.prices.create({
       unit_amount: stripeConfig.initialPlan.amount,
       currency: stripeConfig.initialPlan.currency,
-      recurring: { interval: 'week', interval_count: 1 }, // dummy recurring (required)
       product: initialProduct.id,
       metadata: { type: 'initial' }
     });
