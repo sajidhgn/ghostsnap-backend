@@ -5,6 +5,7 @@ const SubscriptionPlan = require('../models/SubscriptionPlan');
 const { ErrorResponse, asyncHandler } = require('../utils/errorHandler');
 const { stripe, getOrCreateCustomer } = require('../config/stripe');
 const { sendSubscriptionEmail } = require('../utils/email');
+const { getPlanForUser, markUserAsEverSubscribed } = require('../services/subscriptionPlanService');
 
 // @desc    Get subscription plans
 // @route   GET /api/subscriptions/plans
@@ -39,18 +40,19 @@ const createCheckoutSession = asyncHandler(async (req, res, next) => {
   }
 
   // Determine which plan to use based on user's subscription history
-  let plan;
-  if (user.hasEverSubscribed) {
-    // User has subscribed before, use recurring plan (10€ weekly)
-    plan = await SubscriptionPlan.getRecurringPlan();
-  } else {
-    // First-time subscriber, use initial plan (2€ with 3-day trial)
-    plan = await SubscriptionPlan.getInitialPlan();
+  const planResult = await getPlanForUser(user);
+  
+  if (planResult.existingSubscription) {
+    return next(new ErrorResponse('User already has an active subscription', 400));
   }
 
+  const plan = planResult.plan;
   if (!plan) {
     return next(new ErrorResponse('Subscription plan not found', 404));
   }
+
+  console.log(`📋 Selected plan for user ${user.email}: ${plan.name} (${planResult.reason})`);
+  console.log(`🔄 Is returning user: ${planResult.isReturningUser}`);
 
   try {
     // Configure subscription data based on plan type
@@ -58,7 +60,8 @@ const createCheckoutSession = asyncHandler(async (req, res, next) => {
       metadata: {
         userId: user._id.toString(),
         planType: plan.planType,
-        isFirstSubscription: (!user.hasEverSubscribed).toString()
+        isFirstSubscription: (!planResult.isReturningUser).toString(),
+        isReturningUser: planResult.isReturningUser.toString()
       }
     };
 
@@ -66,6 +69,8 @@ const createCheckoutSession = asyncHandler(async (req, res, next) => {
     if (plan.planType === 'initial' && plan.trialPeriodDays > 0) {
       subscriptionData.trial_period_days = plan.trialPeriodDays;
       console.log(`Setting up ${plan.trialPeriodDays}-day trial for initial subscription`);
+    } else if (plan.planType === 'recurring' && planResult.isReturningUser) {
+      console.log(`Returning user - skipping trial, going directly to recurring billing`);
     }
 
     // Create Stripe checkout session
@@ -84,7 +89,8 @@ const createCheckoutSession = asyncHandler(async (req, res, next) => {
       metadata: {
         userId: user._id.toString(),
         planType: plan.planType,
-        isFirstSubscription: (!user.hasEverSubscribed).toString()
+        isFirstSubscription: (!planResult.isReturningUser).toString(),
+        isReturningUser: planResult.isReturningUser.toString()
       },
       subscription_data: subscriptionData
     });
@@ -197,20 +203,71 @@ const reactivateSubscription = asyncHandler(async (req, res, next) => {
   }
 
   try {
-    // Reactivate subscription in Stripe
-    const stripeSubscription = await stripe.subscriptions.update(
+    // If the existing scheduled-to-cancel subscription is on the initial plan,
+    // switch it to the weekly recurring (10 EUR) plan when reactivating.
+    if (subscription.subscriptionType === 'initial') {
+      const recurringPlan = await SubscriptionPlan.getRecurringPlan();
+      if (!recurringPlan || !recurringPlan.stripePriceId) {
+        return next(new ErrorResponse('Recurring plan not found', 500));
+      }
+
+      // Retrieve current subscription to get the item ID
+      const current = await stripe.subscriptions.retrieve(subscription.stripeSubscriptionId);
+      const currentItemId = current?.items?.data?.[0]?.id;
+      if (!currentItemId) {
+        return next(new ErrorResponse('Unable to determine current subscription item', 500));
+      }
+
+      await stripe.subscriptions.update(
+        subscription.stripeSubscriptionId,
+        {
+          cancel_at_period_end: false,
+          items: [
+            {
+              id: currentItemId,
+              price: recurringPlan.stripePriceId
+            }
+          ],
+          proration_behavior: 'none',
+          metadata: {
+            ...subscription.metadata,
+            planType: 'recurring',
+            reactivated: 'true'
+          }
+        }
+      );
+
+      // Update local subscription to reflect recurring plan
+      subscription.cancelAtPeriodEnd = false;
+      subscription.canceledAt = null;
+      subscription.subscriptionType = 'recurring';
+      subscription.stripePriceId = recurringPlan.stripePriceId;
+      subscription.amount = recurringPlan.amount;
+      subscription.interval = recurringPlan.interval;
+      subscription.intervalCount = recurringPlan.intervalCount;
+      subscription.isFirstSubscription = false;
+      await subscription.save();
+
+      return res.status(200).json({
+        success: true,
+        message: 'Subscription reactivated and moved to weekly plan',
+        data: subscription
+      });
+    }
+
+    // Otherwise, just resume the existing recurring subscription
+    await stripe.subscriptions.update(
       subscription.stripeSubscriptionId,
       {
         cancel_at_period_end: false
       }
     );
 
-    // Update local subscription
     subscription.cancelAtPeriodEnd = false;
     subscription.canceledAt = null;
     await subscription.save();
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: 'Subscription reactivated successfully',
       data: subscription

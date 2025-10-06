@@ -21,15 +21,15 @@ const setupStripe = async () => {
     await SubscriptionPlan.deleteMany({});
     console.log('Cleared existing subscription plans');
 
-    // Create initial subscription plan (2€ with 3-day trial)
+    // Create initial subscription plan (2€ one-time payment with 3-day trial)
     const initialPlan = await SubscriptionPlan.create({
       name: 'Initial Subscription',
-      description: '2€ initial subscription with 3-day free trial',
+      description: '2€ one-time payment with 3-day free trial',
       stripePriceId: stripeProducts.initialPriceId,
       stripeProductId: stripeProducts.initialProductId,
       amount: 200, // 2€ in cents
       currency: 'eur',
-      interval: 'week', // Set interval for initial plan
+      interval: undefined, // One-time payment, no recurring interval
       intervalCount: 1,
       planType: 'initial',
       trialPeriodDays: 3,

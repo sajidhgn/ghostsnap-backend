@@ -107,18 +107,8 @@ const verifyOTP = asyncHandler(async (req, res, next) => {
     return sendTokenResponse(user, 200, res, 'Email verified successfully');
   }
 
-  if (type === 'login') {
-    // If user email was not verified, mark it verified after login OTP
-    if (!user.isEmailVerified) {
-      user.isEmailVerified = true;
-      await user.save();
-    }
-
-    return sendTokenResponse(user, 200, res, 'Login successful');
-  }
-
   if (type === 'password_reset') {
-    // This endpoint only verifies OTP. Actual reset is handled separately in resetPassword
+    
     return res.status(200).json({
       success: true,
       message: 'OTP verified successfully. You may now reset your password.',
@@ -137,41 +127,68 @@ const login = asyncHandler(async (req, res, next) => {
 
   // Check for user
   const user = await User.findOne({ email }).select('+password');
+  if (!user) return next(new ErrorResponse('Invalid credentials', 401));
 
-  if (!user) {
-    return next(new ErrorResponse('Invalid credentials', 401));
-  }
-
-  // Check if password matches
+  // Check password
   const isMatch = await user.matchPassword(password);
-
-  if (!isMatch) {
-    return next(new ErrorResponse('Invalid credentials', 401));
-  }
+  if (!isMatch) return next(new ErrorResponse('Invalid credentials', 401));
 
   // Check if user is active
-  if (!user.isActive) {
-    return next(new ErrorResponse('Account is deactivated', 401));
-  }
+  if (!user.isActive) return next(new ErrorResponse('Account is deactivated', 401));
 
   // Update last login
   user.lastLogin = new Date();
   await user.save();
 
-  // If email is not verified, send OTP for login
+  // If email not verified, send OTP
   if (!user.isEmailVerified) {
-    const otp = OTP.generateOTP();
-    
-    await OTP.create({
+    const existingOTP = await OTP.findOne({
       email: user.email,
-      otp,
-      type: 'login',
-      ipAddress: req.ip,
-      userAgent: req.get('User-Agent')
+      type: 'email_verification'
     });
 
+    let otpToSend;
+
+    if (existingOTP) {
+      const now = new Date();
+      const otpExpiry = new Date(existingOTP.expiresAt); // assuming expiresAt field exists
+
+      if (otpExpiry < now) {
+        // expired — remove and regenerate new one
+        await OTP.deleteOne({ _id: existingOTP._id });
+
+        const newOtp = OTP.generateOTP();
+        otpToSend = newOtp;
+
+        await OTP.create({
+          email: user.email,
+          otp: newOtp,
+          type: 'email_verification',
+          ipAddress: req.ip,
+          userAgent: req.get('User-Agent'),
+          expiresAt: new Date(Date.now() + process.env.OTP_EXPIRE_MINUTES * 60 * 1000) // 10 min validity
+        });
+      } else {
+        // existing OTP still valid — reuse it
+        otpToSend = existingOTP.otp;
+      }
+    } else {
+      // No OTP found — create new
+      const newOtp = OTP.generateOTP();
+      otpToSend = newOtp;
+
+      await OTP.create({
+        email: user.email,
+        otp: newOtp,
+        type: 'email_verification',
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        expiresAt: new Date(Date.now() + process.env.OTP_EXPIRE_MINUTES * 60 * 1000)
+      });
+    }
+
     try {
-      await sendOTPEmail(user.email, otp, 'login');
+      await sendOTPEmail(user.email, otpToSend, 'email_verification');
     } catch (error) {
       console.error('Failed to send OTP email:', error);
       return next(new ErrorResponse('Failed to send OTP email', 500));
@@ -188,6 +205,7 @@ const login = asyncHandler(async (req, res, next) => {
   // Generate JWT and send response
   sendTokenResponse(user, 200, res, 'Login successful');
 });
+
 
 // @desc    Logout user / clear cookie
 // @route   POST /api/auth/logout
@@ -230,30 +248,32 @@ const getMe = asyncHandler(async (req, res, next) => {
 const forgotPassword = asyncHandler(async (req, res, next) => {
   const { email } = req.body;
 
+  // Find user by email
   const user = await User.findOne({ email });
-
   if (!user) {
     return next(new ErrorResponse('No user found with that email', 404));
   }
 
-  // Generate OTP
+  // Delete any existing OTP entries for this email
+  await OTP.deleteMany({ email, type: 'password_reset' });
+
+  // Generate new OTP
   const otp = OTP.generateOTP();
-  
-  // Save OTP to database
+
+  // Save new OTP
   await OTP.create({
     email: user.email,
     otp,
     type: 'password_reset',
     ipAddress: req.ip,
-    userAgent: req.get('User-Agent')
+    userAgent: req.get('User-Agent'),
   });
 
   try {
     await sendOTPEmail(user.email, otp, 'password_reset');
-
     res.status(200).json({
       success: true,
-      message: 'Password reset OTP sent to email'
+      message: 'Password reset OTP sent to email',
     });
   } catch (error) {
     console.error('Failed to send password reset email:', error);
@@ -265,29 +285,7 @@ const forgotPassword = asyncHandler(async (req, res, next) => {
 // @route   POST /api/auth/reset-password
 // @access  Public
 const resetPassword = asyncHandler(async (req, res, next) => {
-  const { email, otp, newPassword } = req.body;
-
-  // Find the OTP
-  const otpRecord = await OTP.findOne({
-    email,
-    type: 'password_reset',
-    isUsed: false
-  });
-
-  if (!otpRecord) {
-    return next(new ErrorResponse('Invalid or expired OTP', 400));
-  }
-
-  // Verify OTP
-  const verificationResult = otpRecord.verifyOTP(otp);
-  
-  if (!verificationResult.success) {
-    await otpRecord.save();
-    return next(new ErrorResponse(verificationResult.message, 400));
-  }
-
-  // Mark OTP as used
-  await otpRecord.save();
+  const { email, newPassword } = req.body;
 
   // Get user and update password
   const user = await User.findOne({ email });
@@ -304,6 +302,46 @@ const resetPassword = asyncHandler(async (req, res, next) => {
     success: true,
     message: 'Password reset successfully'
   });
+});
+
+// @desc    Change password (authenticated)
+// @route   POST /api/auth/change-password
+// @access  Private
+const changePassword = asyncHandler(async (req, res, next) => {
+  const { currentPassword, newPassword } = req.body;
+
+  if (!currentPassword || !newPassword) {
+    return next(new ErrorResponse('Current password and new password are required', 400));
+  }
+
+  if (typeof newPassword !== 'string' || newPassword.length < 6) {
+    return next(new ErrorResponse('New password must be at least 6 characters', 400));
+  }
+
+  // Fetch user with password
+  const user = await User.findById(req.user.id).select('+password');
+  if (!user) {
+    return next(new ErrorResponse('User not found', 404));
+  }
+
+  // Verify current password
+  const isMatch = await user.matchPassword(currentPassword);
+  if (!isMatch) {
+    return next(new ErrorResponse('Current password is incorrect', 401));
+  }
+
+  // Avoid reusing the same password
+  const isSameAsOld = await user.matchPassword(newPassword);
+  if (isSameAsOld) {
+    return next(new ErrorResponse('New password must be different from current password', 400));
+  }
+
+  // Update password
+  user.password = newPassword;
+  await user.save();
+
+  // Optionally return a fresh JWT
+  return sendTokenResponse(user, 200, res, 'Password changed successfully');
 });
 
 // @desc    Resend OTP
@@ -359,5 +397,6 @@ module.exports = {
   getMe,
   forgotPassword,
   resetPassword,
-  resendOTP
+  resendOTP,
+  changePassword
 };

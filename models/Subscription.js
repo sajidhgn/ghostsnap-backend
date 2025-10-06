@@ -76,7 +76,7 @@ const subscriptionSchema = new mongoose.Schema({
   interval: {
     type: String,
     enum: ['day', 'week', 'month', 'year'],
-    required: true
+    required: false // Allow undefined for one-time payments
   },
   intervalCount: {
     type: Number,

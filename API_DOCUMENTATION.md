@@ -454,6 +454,7 @@ Stripe webhook handler for subscription events.
 - `customer.subscription.updated`
 - `customer.subscription.deleted`
 - `invoice.payment_succeeded`
+- `payment_intent.succeeded`
 - `invoice.payment_failed`
 - `customer.subscription.trial_will_end`
 
